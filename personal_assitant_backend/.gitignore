@@ -1,0 +1,15 @@
+.env
+venv
+query_fake_data.txt
+__pycache__/
+*.pyc
+/synthetic_data/
+plan.md
+
+# Log files and directories
+/logs/
+*.log
+flow_*.md
+
+/data/
+data.xlsx
