@@ -63,12 +63,17 @@ class EmailTool:
             for email_id in email_ids[-limit:]:
                 try:
                     status, data = mail.fetch(email_id, '(RFC822)')
-                    if status == 'OK':
+                    if status == 'OK' and data and data[0]:
                         raw_email = data[0][1]
+                        if not raw_email:
+                            continue
+                            
                         email_message = email.message_from_bytes(raw_email)
+                        if not email_message:
+                            continue
                         
                         # Decode subject safely
-                        subject = email_message['subject']
+                        subject = email_message.get('subject', '')
                         if subject:
                             try:
                                 decoded_subject = decode_header(subject)[0]
@@ -82,12 +87,34 @@ class EmailTool:
                         # Get email body
                         body = self._get_email_body(email_message)
                         
+                        # Get sender safely
+                        sender = email_message.get('from', '')
+                        if sender:
+                            try:
+                                decoded_sender = decode_header(sender)[0]
+                                if isinstance(decoded_sender[0], bytes):
+                                    sender = decoded_sender[0].decode(decoded_sender[1] or 'utf-8')
+                                else:
+                                    sender = decoded_sender[0]
+                            except:
+                                sender = str(sender)
+                        
+                        # Get date safely
+                        date = email_message.get('date', '')
+                        if date:
+                            try:
+                                # Try to parse the date
+                                date_obj = email.utils.parsedate_to_datetime(date)
+                                date = date_obj.strftime('%Y-%m-%d %H:%M:%S')
+                            except:
+                                date = str(date)
+                        
                         emails.append({
-                            'id': email_id.decode(),
+                            'id': email_id.decode() if email_id else '',
                             'subject': subject or 'No Subject',
-                            'from': email_message['from'] or 'Unknown Sender',
-                            'to': email_message['to'] or '',
-                            'date': email_message['date'] or '',
+                            'from': sender or 'Unknown Sender',
+                            'to': email_message.get('to', '') or '',
+                            'date': date or '',
                             'body': body[:500] + '...' if len(body) > 500 else body
                         })
                 except Exception as e:
@@ -104,12 +131,18 @@ class EmailTool:
     
     def _get_email_body(self, email_message):
         """Extract email body handling multipart messages"""
+        if not email_message:
+            return ""
+            
         body = ""
         
         if email_message.is_multipart():
             for part in email_message.walk():
+                if not part:
+                    continue
+                    
                 content_type = part.get_content_type()
-                content_disposition = str(part.get("Content-Disposition"))
+                content_disposition = str(part.get("Content-Disposition", ""))
                 
                 if content_type == "text/plain" and "attachment" not in content_disposition:
                     try:
@@ -125,9 +158,9 @@ class EmailTool:
                 if payload:
                     body = payload.decode('utf-8', errors='ignore')
                 else:
-                    body = str(email_message.get_payload())
+                    body = str(email_message.get_payload() or "")
             except:
-                body = str(email_message.get_payload())
+                body = str(email_message.get_payload() or "")
         
         return body
     
@@ -364,23 +397,4 @@ This meeting has been added to the calendar."""
             print(f"Error analyzing data: {e}")
             return "Error analyzing data"
     
-    def test_connections(self):
-        """Test both email and calendar connections"""
-        print("Testing email connection...")
-        emails = self.email_tool.read_emails(limit=1)
-        email_ok = len(emails) >= 0
-        
-        print("Testing calendar connection...")
-        if self.calendar_tool.caldav_url and CALENDAR_SUPPORT:
-            events = self.calendar_tool.get_events(days_ahead=1)
-            calendar_ok = isinstance(events, list)
-        else:
-            print("⚠️  Calendar test skipped - no CalDAV URL or libraries missing")
-            calendar_ok = False
-        
-        return {
-            'email': email_ok,
-            'calendar': calendar_ok,
-            'status': 'OK' if email_ok and calendar_ok else 'PARTIAL' if email_ok else 'FAILED'
-        }
 

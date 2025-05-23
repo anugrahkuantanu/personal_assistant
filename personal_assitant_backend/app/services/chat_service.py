@@ -10,7 +10,7 @@ from typing import Dict, Any
 from fastapi import WebSocket
 from app.core.config import settings
 from app.tools.onecom_tools import OneComTools
-from app.services.ai_agent_service import AIAgentService
+from app.agents.agent_factory import AgentFactory
 from openai import AsyncOpenAI
 
 class ConnectionManager:
@@ -49,15 +49,23 @@ class EnhancedChatService:
             password=settings.EMAIL_PASSWORD
         )
         
-        # Initialize AI Agent Service
-        self.ai_agent_service = AIAgentService(self.onecom_tools)
+        # Initialize Agent Factory
+        self.agent_factory = AgentFactory(self.onecom_tools)
     
     async def process_message(self, message: str, client_id: str) -> Dict[str, Any]:
         """Process user message with AI agent capabilities"""
         try:
-            # Check if this is an agent-related request
-            if self._is_agent_request(message):
-                return await self._handle_agent_request(message, client_id)
+            # Determine which agent to use
+            agent_type = await self._determine_agent_type(message)
+            
+            if agent_type:
+                # Get context from other agents if needed
+                context = await self._get_agent_context(agent_type)
+                
+                # Process with appropriate agent
+                return await self.agent_factory.process_request(
+                    message, agent_type, context
+                )
             else:
                 return await self._handle_regular_chat(message, client_id)
                 
@@ -69,48 +77,44 @@ class EnhancedChatService:
                 "timestamp": datetime.utcnow().isoformat()
             }
     
-    def _is_agent_request(self, message: str) -> bool:
-        """Determine if message requires agent functionality"""
-        agent_keywords = [
-            'calendar', 'schedule', 'meeting', 'appointment', 'events',
-            'email', 'emails', 'send email', 'write email', 'compose',
-            'plan', 'summary', 'today', 'tomorrow', 'next week',
-            'free time', 'available', 'busy', 'check my'
-        ]
+    async def _determine_agent_type(self, message: str) -> str:
+        """Determine which agent should handle the message"""
+        system_prompt = """Analyze the user's message and determine which type of agent should handle it.
+        Options:
+        - email: For email-related tasks (reading, composing, sending emails)
+        - schedule: For calendar and scheduling tasks
+        - None: For general conversation
         
-        message_lower = message.lower()
-        return any(keyword in message_lower for keyword in agent_keywords)
-    
-    async def _handle_agent_request(self, message: str, client_id: str) -> Dict[str, Any]:
-        """Handle agent-powered requests"""
+        Return just the agent type as a string, or None if no specific agent is needed."""
         
-        # Use AI Agent Service to process the request
-        result = await self.ai_agent_service.process_user_request(message, client_id)
-        
-        if result["success"]:
-            response = result["response"]
+        try:
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": message}
+                ],
+                temperature=0.3,
+                max_tokens=50
+            )
             
-            # Format response for WebSocket
-            return {
-                "success": True,
-                "message": response.get("message", "Request processed successfully"),
-                "type": response.get("type", "agent_response"),
-                "data": {
-                    "intent": result.get("intent", {}),
-                    "events_count": response.get("events_count", 0),
-                    "emails_count": response.get("emails_analyzed", 0),
-                    "action_result": response.get("action_result"),
-                    "email_content": response.get("email_content")
-                },
-                "timestamp": datetime.utcnow().isoformat()
-            }
-        else:
-            return {
-                "success": False,
-                "message": f"I couldn't process your request: {result.get('error', 'Unknown error')}",
-                "type": "error",
-                "timestamp": datetime.utcnow().isoformat()
-            }
+            agent_type = response.choices[0].message.content.strip().lower()
+            return agent_type if agent_type in ["email", "schedule"] else None
+            
+        except Exception:
+            return None
+    
+    async def _get_agent_context(self, agent_type: str) -> Dict[str, Any]:
+        """Get context from other agents if needed"""
+        context = {}
+        
+        if agent_type == "email":
+            # Get calendar data for email composition
+            schedule_agent = self.agent_factory.get_agent("schedule")
+            calendar_data = await schedule_agent._get_calendar_data(7)
+            context["calendar_data"] = calendar_data
+        
+        return context
     
     async def _handle_regular_chat(self, message: str, client_id: str) -> Dict[str, Any]:
         """Handle regular chat without agent functionality"""

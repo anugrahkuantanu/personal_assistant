@@ -12,6 +12,8 @@ from app.core.config import settings
 from app.tools.onecom_tools import OneComTools
 from concurrent.futures import ThreadPoolExecutor
 from enum import Enum
+from app.agents.base_agent import BaseAgent
+from app.agents.schedule_agent import CalendarAnalyzer
 
 class AgentAction(Enum):
     """Available agent actions"""
@@ -33,7 +35,7 @@ class AIAgentService:
         # Analyzers
         self.calendar_analyzer = CalendarAnalyzer(self.openai_client)
         self.email_analyzer = EmailAnalyzer(self.openai_client)
-        self.email_composer = EmailComposer(self.openai_client)
+        self.email_composer = EmailComposer(self.openai_client, self.onecom_tools)
         
     async def process_user_request(self, user_message: str, client_id: str) -> Dict[str, Any]:
         """
@@ -266,123 +268,6 @@ class AIAgentService:
             return {"success": False, "error": str(e)}
 
 
-class CalendarAnalyzer:
-    """GPT-powered calendar analysis"""
-    
-    def __init__(self, openai_client: AsyncOpenAI):
-        self.openai_client = openai_client
-    
-    async def analyze_schedule(self, events: List[Dict], user_message: str, 
-                             intent: Dict) -> Dict[str, Any]:
-        """Analyze calendar events with GPT"""
-        
-        if not events:
-            return {
-                "message": "You have no upcoming events in your calendar.",
-                "type": "calendar_analysis",
-                "events_count": 0
-            }
-        
-        # Prepare events for GPT analysis
-        events_text = self._format_events_for_analysis(events)
-        
-        system_prompt = """You are a personal assistant analyzing calendar data. Provide insights about the user's schedule.
-
-        Focus on:
-        - Key appointments and commitments
-        - Time conflicts or busy periods
-        - Free time availability
-        - Scheduling patterns and recommendations
-        - Priority items that need attention
-
-        Be specific and actionable in your analysis."""
-
-        user_prompt = f"""
-User asked: "{user_message}"
-
-Here are their upcoming calendar events:
-{events_text}
-
-Please analyze their schedule and provide relevant insights based on their question."""
-
-        try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=500
-            )
-            
-            return {
-                "message": response.choices[0].message.content,
-                "type": "calendar_analysis",
-                "events_count": len(events),
-                "free_time_slots": self._identify_free_time(events)
-            }
-            
-        except Exception as e:
-            return {
-                "message": f"I found {len(events)} events but couldn't analyze them: {str(e)}",
-                "type": "error"
-            }
-    
-    def _format_events_for_analysis(self, events: List[Dict]) -> str:
-        """Format events for GPT analysis"""
-        formatted_events = []
-        
-        for event in events:
-            start = event.get('start', 'Unknown time')
-            end = event.get('end', 'Unknown time')
-            summary = event.get('summary', 'No title')
-            location = event.get('location', '')
-            description = event.get('description', '')
-            
-            event_text = f"• {summary}"
-            if start:
-                if hasattr(start, 'strftime'):
-                    event_text += f" - {start.strftime('%A, %B %d at %I:%M %p')}"
-                else:
-                    event_text += f" - {start}"
-            
-            if location:
-                event_text += f" (Location: {location})"
-            
-            if description:
-                event_text += f" - {description[:100]}..."
-            
-            formatted_events.append(event_text)
-        
-        return '\n'.join(formatted_events)
-    
-    def _identify_free_time(self, events: List[Dict]) -> List[Dict]:
-        """Identify free time slots between events"""
-        # Simple free time identification
-        # This could be enhanced with more sophisticated logic
-        free_slots = []
-        
-        # Sort events by start time
-        sorted_events = sorted(events, key=lambda e: e.get('start', datetime.now()))
-        
-        # Find gaps between events (simplified)
-        for i in range(len(sorted_events) - 1):
-            current_end = sorted_events[i].get('end')
-            next_start = sorted_events[i + 1].get('start')
-            
-            if current_end and next_start and hasattr(current_end, 'hour') and hasattr(next_start, 'hour'):
-                gap_hours = (next_start - current_end).total_seconds() / 3600
-                if gap_hours > 1:  # At least 1 hour gap
-                    free_slots.append({
-                        "start": current_end,
-                        "end": next_start,
-                        "duration_hours": gap_hours
-                    })
-        
-        return free_slots
-
-
 class EmailAnalyzer:
     """GPT-powered email analysis"""
     
@@ -483,8 +368,9 @@ Please analyze these emails and provide relevant insights based on their questio
 class EmailComposer:
     """GPT-powered email composition with calendar integration"""
     
-    def __init__(self, openai_client: AsyncOpenAI):
+    def __init__(self, openai_client: AsyncOpenAI, onecom_tools: OneComTools):
         self.openai_client = openai_client
+        self.onecom_tools = onecom_tools
     
     async def compose_email_with_calendar(self, user_message: str, 
                                         calendar_data: List[Dict], 
@@ -509,7 +395,9 @@ Return a JSON object with:
     "body": "email body text",
     "should_send": true/false,
     "recipient_notes": "any notes about the recipient or email"
-}"""
+}
+
+IMPORTANT: Return ONLY the JSON object, no additional text or formatting."""
 
         user_prompt = f"""
 User request: "{user_message}"
@@ -517,7 +405,7 @@ User request: "{user_message}"
 Available free time slots based on their calendar:
 {free_time_text}
 
-Compose an appropriate email based on their request."""
+Compose an appropriate email based on their request. Return ONLY the JSON object, no additional text."""
 
         try:
             response = await self.openai_client.chat.completions.create(
@@ -530,8 +418,71 @@ Compose an appropriate email based on their request."""
                 max_tokens=600
             )
             
-            email_content = json.loads(response.choices[0].message.content)
+            # Clean the response text before parsing
+            response_text = response.choices[0].message.content.strip()
             
+            # Remove any potential BOM or control characters
+            response_text = ''.join(char for char in response_text if ord(char) >= 32 or char in '\n\r\t')
+            
+            try:
+                email_content = json.loads(response_text)
+            except json.JSONDecodeError as e:
+                print(f"JSON parsing error: {str(e)}")
+                print(f"Raw response: {response_text}")
+                return {
+                    "message": "Failed to parse email content. Please try again.",
+                    "type": "error"
+                }
+            
+            # Validate required fields
+            required_fields = ["subject", "body"]
+            if not all(field in email_content for field in required_fields):
+                return {
+                    "message": "Email content missing required fields (subject or body)",
+                    "type": "error"
+                }
+            
+            # If this is a send_email action, we should send the email
+            if intent.get("action") == AgentAction.SEND_EMAIL.value:
+                # Get the recipient from the intent
+                recipient = intent.get("recipient_email")
+                if not recipient:
+                    return {
+                        "message": "No recipient email specified. Please provide an email address to send to.",
+                        "type": "error"
+                    }
+                
+                # Send the email
+                try:
+                    success = await asyncio.get_event_loop().run_in_executor(
+                        None,
+                        self.onecom_tools.email_tool.send_email,
+                        recipient,
+                        email_content["subject"],
+                        email_content["body"],
+                        email_content.get("html_body")
+                    )
+                    
+                    if success:
+                        return {
+                            "message": f"Email sent successfully to {recipient}",
+                            "type": "email_sent",
+                            "email_content": email_content
+                        }
+                    else:
+                        return {
+                            "message": "Failed to send email. Please check your email settings.",
+                            "type": "error",
+                            "email_content": email_content
+                        }
+                except Exception as e:
+                    return {
+                        "message": f"Error sending email: {str(e)}",
+                        "type": "error",
+                        "email_content": email_content
+                    }
+            
+            # If this is just composition, return the composed email
             return {
                 "message": f"I've composed an email for you. Subject: '{email_content['subject']}'",
                 "email_content": email_content,
@@ -540,6 +491,7 @@ Compose an appropriate email based on their request."""
             }
             
         except Exception as e:
+            print(f"Error in email composition: {str(e)}")
             return {
                 "message": f"I couldn't compose the email: {str(e)}",
                 "type": "error"
@@ -552,23 +504,163 @@ Compose an appropriate email based on their request."""
             return "No specific calendar events found. Generally available for meetings."
         
         # Simple approach: identify common free time patterns
-        free_times = []
-        
-        # Check common meeting times
-        common_times = [
-            "Monday 9:00-11:00 AM",
-            "Tuesday 2:00-4:00 PM", 
-            "Wednesday 10:00-12:00 PM",
-            "Thursday 1:00-3:00 PM",
-            "Friday 9:00-11:00 AM"
-        ]
-        
-        # In a real implementation, you'd analyze the actual calendar events
-        # For now, provide some sample availability
         free_times = [
             "Tuesday, November 28th - 2:00-4:00 PM",
             "Wednesday, November 29th - 10:00 AM-12:00 PM", 
             "Thursday, November 30th - 1:00-3:00 PM"
         ]
         
-        return '\n'.join([f"• {slot}" for slot in free_times]) 
+        return '\n'.join([f"• {slot}" for slot in free_times])
+
+
+class EmailAgent(BaseAgent):
+    """Email agent for handling email-related tasks"""
+    
+    def __init__(self, onecom_tools: OneComTools):
+        super().__init__()
+        self.onecom_tools = onecom_tools
+        self.email_analyzer = EmailAnalyzer(self.openai_client)
+        self.email_composer = EmailComposer(self.openai_client, self.onecom_tools)
+    
+    async def process_request(self, user_message: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
+        """Process email-related requests"""
+        try:
+            intent = await self._analyze_email_intent(user_message)
+            
+            if intent["action"] == "analyze_emails":
+                email_data = await self._get_email_data(intent.get("email_limit", 10))
+                if not email_data:
+                    return {
+                        "success": False,
+                        "message": "No emails were found or there was an error reading emails.",
+                        "type": "error"
+                    }
+                return await self.email_analyzer.analyze_emails(email_data, user_message, intent)
+            elif intent["action"] in ["compose_email", "send_email"]:
+                calendar_data = context.get("calendar_data", []) if context else []
+                # Force the action to SEND_EMAIL if it's compose_email
+                if intent["action"] == "compose_email":
+                    intent["action"] = "send_email"
+                email_content = await self.email_composer.compose_email_with_calendar(
+                    user_message, calendar_data, intent
+                )
+                return await self._execute_email_action(email_content, intent)
+            else:
+                return {
+                    "success": False,
+                    "message": "I couldn't understand what you want to do with emails.",
+                    "type": "error"
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error processing email request: {str(e)}",
+                "type": "error"
+            }
+    
+    async def _analyze_email_intent(self, user_message: str) -> Dict[str, Any]:
+        """Analyze user's email-related intent"""
+        system_prompt = """Analyze the user's message for email-related intents.
+        Determine if they want to:
+        - Analyze emails
+        - Compose an email
+        - Send an email
+        
+        Return a JSON object with:
+        {
+            "action": "analyze_emails|compose_email|send_email",
+            "email_limit": number of emails to analyze,
+            "recipient_email": "email address if sending",
+            "urgency": "high|medium|low"
+        }
+        
+        If the message indicates sending an email, always set action to "send_email"."""
+        
+        intent_text = await self._generate_ai_response(system_prompt, user_message, temperature=0.3)
+        return json.loads(intent_text)
+    
+    async def _get_email_data(self, limit: int = 10) -> Optional[List[Dict]]:
+        """Get email data from OneCom tools"""
+        try:
+            if not self.onecom_tools or not self.onecom_tools.email_tool:
+                raise Exception("Email tool not properly initialized")
+            
+            # Use run_in_executor to run synchronous code in a thread pool
+            loop = asyncio.get_event_loop()
+            emails = await loop.run_in_executor(
+                None,  # Use default executor
+                self.onecom_tools.email_tool.read_emails,
+                limit
+            )
+            
+            # Validate and clean email data
+            if emails is None:
+                return []
+                
+            cleaned_emails = []
+            for email in emails:
+                if email is None:
+                    continue
+                    
+                cleaned_email = {
+                    'subject': str(email.get('subject', 'No subject')),
+                    'from': str(email.get('from', 'Unknown sender')),
+                    'date': str(email.get('date', 'Unknown date')),
+                    'body': str(email.get('body', '')) if email.get('body') else ''
+                }
+                cleaned_emails.append(cleaned_email)
+            
+            return cleaned_emails
+            
+        except Exception as e:
+            print(f"Error reading emails: {str(e)}")  # Log the error
+            return []
+    
+    async def _execute_email_action(self, response: Dict, intent: Dict) -> Dict[str, Any]:
+        """Execute email sending action"""
+        try:
+            if not response or not response.get("email_content"):
+                return {"success": False, "error": "No email content generated"}
+            
+            recipient = intent.get("recipient_email")
+            if not recipient:
+                return {"success": False, "error": "No recipient email specified"}
+            
+            email_data = response["email_content"]
+            if not isinstance(email_data, dict):
+                return {"success": False, "error": "Invalid email content format"}
+            
+            # Validate required fields
+            required_fields = ["subject", "body"]
+            if not all(field in email_data for field in required_fields):
+                return {"success": False, "error": "Missing required email fields"}
+            
+            # Use run_in_executor to run synchronous code in a thread pool
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None,  # Use default executor
+                self.onecom_tools.email_tool.send_email,
+                recipient,
+                str(email_data["subject"]),
+                str(email_data["body"]),
+                str(email_data.get("html_body", "")) if email_data.get("html_body") else None
+            )
+            
+            if success:
+                return {
+                    "success": True,
+                    "message": f"Email sent successfully to {recipient}",
+                    "recipient": recipient,
+                    "subject": email_data["subject"],
+                    "type": "email_sent"
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "Failed to send email. Please check your email settings.",
+                    "type": "error"
+                }
+            
+        except Exception as e:
+            return {"success": False, "error": str(e)} 
