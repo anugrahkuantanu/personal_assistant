@@ -1,550 +1,63 @@
 """
-AI Agent Service - GPT-Powered Intelligence Layer
-Handles AI analysis of calendar and email data with proper separation of concerns
+Fixed Email Agent with Robust JSON Handling
+File: app/agents/email_agent.py
+
+Handles all email tasks with improved error handling and proper JSON parsing
 """
 
 import json
 import asyncio
-from datetime import datetime, timedelta
-from typing import Dict, List, Optional, Any
-from openai import AsyncOpenAI
-from app.core.config import settings
-from app.tools.onecom_tools import OneComTools
-from concurrent.futures import ThreadPoolExecutor
-from enum import Enum
+import re
+from typing import Dict, List, Any, Optional
+from datetime import datetime
 from app.agents.base_agent import BaseAgent
-from app.agents.schedule_agent import CalendarAnalyzer
-
-class AgentAction(Enum):
-    """Available agent actions"""
-    ANALYZE_CALENDAR = "analyze_calendar"
-    ANALYZE_EMAILS = "analyze_emails"
-    COMPOSE_EMAIL = "compose_email" 
-    SCHEDULE_MEETING = "schedule_meeting"
-    GET_SUMMARY = "get_summary"
-    SEND_EMAIL = "send_email"
-
-class AIAgentService:
-    """Main AI Agent Service that orchestrates GPT with OneCom tools"""
-    
-    def __init__(self, onecom_tools: OneComTools):
-        self.openai_client = AsyncOpenAI(api_key=settings.OPENAI_API_KEY)
-        self.onecom_tools = onecom_tools
-        self.executor = ThreadPoolExecutor(max_workers=4)
-        
-        # Analyzers
-        self.calendar_analyzer = CalendarAnalyzer(self.openai_client)
-        self.email_analyzer = EmailAnalyzer(self.openai_client)
-        self.email_composer = EmailComposer(self.openai_client, self.onecom_tools)
-        
-    async def process_user_request(self, user_message: str, client_id: str) -> Dict[str, Any]:
-        """
-        Main entry point - processes user request and determines what actions to take
-        """
-        try:
-            # First, use GPT to understand what the user wants
-            intent = await self._analyze_user_intent(user_message)
-            
-            # Execute the appropriate actions based on intent
-            if intent["needs_calendar"]:
-                calendar_data = await self._get_calendar_data(intent.get("calendar_days", 7))
-            else:
-                calendar_data = []
-                
-            if intent["needs_emails"]:
-                email_data = await self._get_email_data(intent.get("email_limit", 10))
-            else:
-                email_data = []
-            
-            # Generate AI-powered response
-            response = await self._generate_ai_response(
-                user_message, intent, calendar_data, email_data
-            )
-            
-            # Execute any actions (like sending emails)
-            if intent["action"] == AgentAction.SEND_EMAIL.value:
-                action_result = await self._execute_email_action(response, intent)
-                response["action_result"] = action_result
-            
-            return {
-                "success": True,
-                "response": response,
-                "intent": intent,
-                "timestamp": datetime.utcnow().isoformat()
-            }
-            
-        except Exception as e:
-            return {
-                "success": False,
-                "error": str(e),
-                "timestamp": datetime.utcnow().isoformat()
-            }
-    
-    async def _analyze_user_intent(self, user_message: str) -> Dict[str, Any]:
-        """Use GPT to analyze what the user wants to do"""
-        
-        system_prompt = """You are an AI assistant that analyzes user requests for a personal assistant that has access to email and calendar data.
-
-        Analyze the user's message and determine:
-        1. What data they need (calendar, emails, or both)
-        2. What action they want to take
-        3. Any specific parameters
-
-        Respond with a JSON object containing:
-        {
-            "intent": "brief description of what user wants",
-            "action": "analyze_calendar|analyze_emails|compose_email|schedule_meeting|get_summary|send_email",
-            "needs_calendar": true/false,
-            "needs_emails": true/false,
-            "calendar_days": number of days to look ahead (default 7),
-            "email_limit": number of recent emails to analyze (default 10),
-            "recipient_email": "email address if sending email",
-            "urgency": "high|medium|low",
-            "specific_requests": ["list of specific things user mentioned"]
-        }
-
-        Examples:
-        - "What's my plan for the next 3 days?" → needs_calendar: true, calendar_days: 3, action: "analyze_calendar"
-        - "Write email to john@example.com asking when he's free" → needs_calendar: true, action: "compose_email", recipient_email: "john@example.com"
-        - "Check my recent emails" → needs_emails: true, action: "analyze_emails"
-        - "What should I focus on today?" → needs_calendar: true, needs_emails: true, action: "get_summary"
-        """
-        
-        try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_message}
-                ],
-                temperature=0.3,
-                max_tokens=500
-            )
-            
-            intent_text = response.choices[0].message.content
-            intent = json.loads(intent_text)
-            return intent
-            
-        except Exception as e:
-            # Fallback intent
-            return {
-                "intent": "general assistance",
-                "action": "get_summary",
-                "needs_calendar": "calendar" in user_message.lower(),
-                "needs_emails": "email" in user_message.lower(),
-                "calendar_days": 7,
-                "email_limit": 5,
-                "urgency": "medium",
-                "specific_requests": []
-            }
-    
-    async def _get_calendar_data(self, days_ahead: int = 7) -> List[Dict]:
-        """Get calendar data in a separate thread"""
-        loop = asyncio.get_event_loop()
-        events = await loop.run_in_executor(
-            self.executor, 
-            self.onecom_tools.calendar_tool.get_events, 
-            days_ahead
-        )
-        return events
-    
-    async def _get_email_data(self, limit: int = 10) -> List[Dict]:
-        """Get email data in a separate thread"""
-        loop = asyncio.get_event_loop()
-        emails = await loop.run_in_executor(
-            self.executor,
-            self.onecom_tools.email_tool.read_emails,
-            limit
-        )
-        return emails
-    
-    async def _generate_ai_response(self, user_message: str, intent: Dict, 
-                                  calendar_data: List[Dict], email_data: List[Dict]) -> Dict[str, Any]:
-        """Generate AI response based on intent and data"""
-        
-        action = intent["action"]
-        
-        if action == AgentAction.ANALYZE_CALENDAR.value:
-            return await self.calendar_analyzer.analyze_schedule(
-                calendar_data, user_message, intent
-            )
-        elif action == AgentAction.ANALYZE_EMAILS.value:
-            return await self.email_analyzer.analyze_emails(
-                email_data, user_message, intent
-            )
-        elif action == AgentAction.COMPOSE_EMAIL.value:
-            return await self.email_composer.compose_email_with_calendar(
-                user_message, calendar_data, intent
-            )
-        elif action == AgentAction.GET_SUMMARY.value:
-            return await self._generate_combined_summary(
-                calendar_data, email_data, user_message, intent
-            )
-        else:
-            return {"message": "I can help you with calendar analysis, email management, and scheduling. What would you like to do?"}
-    
-    async def _generate_combined_summary(self, calendar_data: List[Dict], 
-                                       email_data: List[Dict], user_message: str, 
-                                       intent: Dict) -> Dict[str, Any]:
-        """Generate combined analysis of calendar and emails"""
-        
-        # Prepare data context
-        calendar_summary = await self.calendar_analyzer.analyze_schedule(calendar_data, user_message, intent)
-        email_summary = await self.email_analyzer.analyze_emails(email_data, user_message, intent)
-        
-        system_prompt = """You are a helpful personal assistant. Combine the calendar and email analysis to provide a comprehensive overview that directly answers the user's question.
-
-        Focus on:
-        - Key priorities and upcoming commitments
-        - Important emails that need attention
-        - Time management insights
-        - Actionable recommendations
-
-        Be concise but thorough. Use a friendly, professional tone."""
-
-        user_context = f"""
-        User asked: "{user_message}"
-
-        Calendar Analysis: {calendar_summary.get('message', 'No calendar data')}
-
-        Email Analysis: {email_summary.get('message', 'No email data')}
-
-        Please provide a combined summary that answers their question."""
-
-        try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_context}
-                ],
-                temperature=0.7,
-                max_tokens=600
-            )
-            
-            return {
-                "message": response.choices[0].message.content,
-                "type": "combined_summary",
-                "calendar_events": len(calendar_data),
-                "emails_analyzed": len(email_data)
-            }
-            
-        except Exception as e:
-            return {
-                "message": f"I encountered an issue generating your summary: {str(e)}",
-                "type": "error"
-            }
-    
-    async def _execute_email_action(self, response: Dict, intent: Dict) -> Dict[str, Any]:
-        """Execute email sending action"""
-        try:
-            if not response.get("email_content"):
-                return {"success": False, "error": "No email content generated"}
-            
-            recipient = intent.get("recipient_email")
-            if not recipient:
-                return {"success": False, "error": "No recipient email specified"}
-            
-            email_data = response["email_content"]
-            
-            # Send email in separate thread
-            loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(
-                self.executor,
-                self.onecom_tools.email_tool.send_email,
-                recipient,
-                email_data["subject"],
-                email_data["body"],
-                email_data.get("html_body")
-            )
-            
-            return {
-                "success": success,
-                "recipient": recipient,
-                "subject": email_data["subject"]
-            }
-            
-        except Exception as e:
-            return {"success": False, "error": str(e)}
-
-
-class EmailAnalyzer:
-    """GPT-powered email analysis"""
-    
-    def __init__(self, openai_client: AsyncOpenAI):
-        self.openai_client = openai_client
-    
-    async def analyze_emails(self, emails: List[Dict], user_message: str, 
-                           intent: Dict) -> Dict[str, Any]:
-        """Analyze emails with GPT"""
-        
-        if not emails:
-            return {
-                "message": "You have no recent emails to analyze.",
-                "type": "email_analysis",
-                "emails_count": 0
-            }
-        
-        emails_text = self._format_emails_for_analysis(emails)
-        
-        system_prompt = """You are a personal assistant analyzing email data. Provide insights about important emails.
-
-        Focus on:
-        - Urgent emails that need immediate attention
-        - Important emails from key contacts
-        - Action items and follow-ups needed
-        - Meeting requests or calendar-related emails
-        - Overall email patterns and priorities
-
-        Be specific about which emails are most important and why."""
-
-        user_prompt = f"""
-        User asked: "{user_message}"
-
-        Here are their recent emails:
-        {emails_text}
-
-        Please analyze these emails and provide relevant insights based on their question."""
-
-        try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=500
-            )
-            
-            return {
-                "message": response.choices[0].message.content,
-                "type": "email_analysis",
-                "emails_count": len(emails),
-                "urgent_emails": self._identify_urgent_emails(emails)
-            }
-            
-        except Exception as e:
-            return {
-                "message": f"I found {len(emails)} emails but couldn't analyze them: {str(e)}",
-                "type": "error"
-            }
-    
-    def _format_emails_for_analysis(self, emails: List[Dict]) -> str:
-        """Format emails for GPT analysis"""
-        formatted_emails = []
-        
-        for i, email in enumerate(emails, 1):
-            subject = email.get('subject', 'No subject')
-            sender = email.get('from', 'Unknown sender')
-            date = email.get('date', 'Unknown date')
-            body = email.get('body', '')[:200] + '...' if email.get('body') else ''
-            
-            email_text = f"{i}. From: {sender}\n   Subject: {subject}\n   Date: {date}"
-            if body:
-                email_text += f"\n   Preview: {body}"
-            
-            formatted_emails.append(email_text)
-        
-        return '\n\n'.join(formatted_emails)
-    
-    def _identify_urgent_emails(self, emails: List[Dict]) -> List[Dict]:
-        """Identify potentially urgent emails based on keywords"""
-        urgent_keywords = ['urgent', 'asap', 'immediate', 'deadline', 'important', 'meeting']
-        urgent_emails = []
-        
-        for email in emails:
-            subject = (email.get('subject', '') + ' ' + email.get('body', '')).lower()
-            if any(keyword in subject for keyword in urgent_keywords):
-                urgent_emails.append({
-                    'subject': email.get('subject'),
-                    'from': email.get('from'),
-                    'reason': 'Contains urgent keywords'
-                })
-        
-        return urgent_emails
-
-
-class EmailComposer:
-    """GPT-powered email composition with calendar integration"""
-    
-    def __init__(self, openai_client: AsyncOpenAI, onecom_tools: OneComTools):
-        self.openai_client = openai_client
-        self.onecom_tools = onecom_tools
-    
-    async def compose_email_with_calendar(self, user_message: str, 
-                                        calendar_data: List[Dict], 
-                                        intent: Dict) -> Dict[str, Any]:
-        """Compose email with calendar context"""
-        
-        # Format calendar data for email context
-        free_time_text = self._format_free_time_for_email(calendar_data)
-        
-        system_prompt = """You are a personal assistant composing emails. Use the user's calendar information to suggest available meeting times and write professional, helpful emails.
-
-Guidelines:
-- Be professional but friendly
-- Include specific available time slots when relevant
-- Suggest 2-3 time options when proposing meetings
-- Use the user's actual free time from their calendar
-- Keep emails concise but informative
-
-Return a JSON object with:
-{
-    "subject": "email subject line",
-    "body": "email body text",
-    "should_send": true/false,
-    "recipient_notes": "any notes about the recipient or email"
-}
-
-IMPORTANT: Return ONLY the JSON object, no additional text or formatting."""
-
-        user_prompt = f"""
-User request: "{user_message}"
-
-Available free time slots based on their calendar:
-{free_time_text}
-
-Compose an appropriate email based on their request. Return ONLY the JSON object, no additional text."""
-
-        try:
-            response = await self.openai_client.chat.completions.create(
-                model="gpt-4",
-                messages=[
-                    {"role": "system", "content": system_prompt},
-                    {"role": "user", "content": user_prompt}
-                ],
-                temperature=0.7,
-                max_tokens=600
-            )
-            
-            # Clean the response text before parsing
-            response_text = response.choices[0].message.content.strip()
-            
-            # Remove any potential BOM or control characters
-            response_text = ''.join(char for char in response_text if ord(char) >= 32 or char in '\n\r\t')
-            
-            try:
-                email_content = json.loads(response_text)
-            except json.JSONDecodeError as e:
-                print(f"JSON parsing error: {str(e)}")
-                print(f"Raw response: {response_text}")
-                return {
-                    "message": "Failed to parse email content. Please try again.",
-                    "type": "error"
-                }
-            
-            # Validate required fields
-            required_fields = ["subject", "body"]
-            if not all(field in email_content for field in required_fields):
-                return {
-                    "message": "Email content missing required fields (subject or body)",
-                    "type": "error"
-                }
-            
-            # If this is a send_email action, we should send the email
-            if intent.get("action") == AgentAction.SEND_EMAIL.value:
-                # Get the recipient from the intent
-                recipient = intent.get("recipient_email")
-                if not recipient:
-                    return {
-                        "message": "No recipient email specified. Please provide an email address to send to.",
-                        "type": "error"
-                    }
-                
-                # Send the email
-                try:
-                    success = await asyncio.get_event_loop().run_in_executor(
-                        None,
-                        self.onecom_tools.email_tool.send_email,
-                        recipient,
-                        email_content["subject"],
-                        email_content["body"],
-                        email_content.get("html_body")
-                    )
-                    
-                    if success:
-                        return {
-                            "message": f"Email sent successfully to {recipient}",
-                            "type": "email_sent",
-                            "email_content": email_content
-                        }
-                    else:
-                        return {
-                            "message": "Failed to send email. Please check your email settings.",
-                            "type": "error",
-                            "email_content": email_content
-                        }
-                except Exception as e:
-                    return {
-                        "message": f"Error sending email: {str(e)}",
-                        "type": "error",
-                        "email_content": email_content
-                    }
-            
-            # If this is just composition, return the composed email
-            return {
-                "message": f"I've composed an email for you. Subject: '{email_content['subject']}'",
-                "email_content": email_content,
-                "type": "email_composition",
-                "free_slots_included": len([slot for slot in free_time_text.split('\n') if slot.strip()])
-            }
-            
-        except Exception as e:
-            print(f"Error in email composition: {str(e)}")
-            return {
-                "message": f"I couldn't compose the email: {str(e)}",
-                "type": "error"
-            }
-    
-    def _format_free_time_for_email(self, events: List[Dict]) -> str:
-        """Format free time information for email composition"""
-        
-        if not events:
-            return "No specific calendar events found. Generally available for meetings."
-        
-        # Simple approach: identify common free time patterns
-        free_times = [
-            "Tuesday, November 28th - 2:00-4:00 PM",
-            "Wednesday, November 29th - 10:00 AM-12:00 PM", 
-            "Thursday, November 30th - 1:00-3:00 PM"
-        ]
-        
-        return '\n'.join([f"• {slot}" for slot in free_times])
-
+from app.tools.onecom_tools import OneComTools
 
 class EmailAgent(BaseAgent):
-    """Email agent for handling email-related tasks"""
+    """
+    Fixed Email Agent with Robust Error Handling
+    """
     
     def __init__(self, onecom_tools: OneComTools):
         super().__init__()
         self.onecom_tools = onecom_tools
         self.email_analyzer = EmailAnalyzer(self.openai_client)
-        self.email_composer = EmailComposer(self.openai_client, self.onecom_tools)
+        self.email_composer = EmailComposer(self.openai_client)
     
     async def process_request(self, user_message: str, context: Dict[str, Any] = None) -> Dict[str, Any]:
-        """Process email-related requests"""
+        """Process email request with improved error handling"""
         try:
-            intent = await self._analyze_email_intent(user_message)
+            print(f"EmailAgent processing: {user_message}")
             
-            if intent["action"] == "analyze_emails":
-                email_data = await self._get_email_data(intent.get("email_limit", 10))
-                if not email_data:
-                    return {
-                        "success": False,
-                        "message": "No emails were found or there was an error reading emails.",
-                        "type": "error"
-                    }
-                return await self.email_analyzer.analyze_emails(email_data, user_message, intent)
-            elif intent["action"] in ["compose_email", "send_email"]:
-                calendar_data = context.get("calendar_data", []) if context else []
-                # Force the action to SEND_EMAIL if it's compose_email
-                if intent["action"] == "compose_email":
-                    intent["action"] = "send_email"
-                email_content = await self.email_composer.compose_email_with_calendar(
-                    user_message, calendar_data, intent
+            # Extract conversation context
+            conversation_history = context.get("conversation_history", []) if context else []
+            user_context = context.get("user_context", {}) if context else {}
+            routing_decision = context.get("routing_decision", {}) if context else {}
+            
+            print(f"User context: {user_context}")
+            print(f"Conversation history length: {len(conversation_history)}")
+            
+            # Analyze email task with robust fallback
+            email_task_analysis = await self._analyze_email_task_with_robust_fallback(
+                user_message, conversation_history, user_context
+            )
+            print(f"Email task analysis: {email_task_analysis}")
+            
+            # Route based on task type with context
+            task_type = email_task_analysis["task_type"]
+            
+            if task_type == "read_emails":
+                return await self._handle_read_emails_with_context(
+                    user_message, email_task_analysis, conversation_history
                 )
-                return await self._execute_email_action(email_content, intent)
+            elif task_type == "analyze_emails":
+                return await self._handle_analyze_emails_with_context(
+                    user_message, email_task_analysis, conversation_history
+                )
+            elif task_type in ["compose_email", "send_email"]:
+                return await self._handle_compose_and_send_with_context(
+                    user_message, email_task_analysis, conversation_history, user_context
+                )
             else:
                 return {
                     "success": False,
@@ -553,56 +66,362 @@ class EmailAgent(BaseAgent):
                 }
                 
         except Exception as e:
+            print(f"Error in EmailAgent: {str(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
             return {
                 "success": False,
                 "message": f"Error processing email request: {str(e)}",
                 "type": "error"
             }
     
-    async def _analyze_email_intent(self, user_message: str) -> Dict[str, Any]:
-        """Analyze user's email-related intent"""
-        system_prompt = """Analyze the user's message for email-related intents.
-        Determine if they want to:
-        - Analyze emails
-        - Compose an email
-        - Send an email
+    async def _analyze_email_task_with_robust_fallback(self, message: str, 
+                                                      conversation_history: List[Dict], 
+                                                      user_context: Dict) -> Dict[str, Any]:
+        """Analyze email task with robust fallback logic"""
         
-        Return a JSON object with:
-        {
-            "action": "analyze_emails|compose_email|send_email",
-            "email_limit": number of emails to analyze,
-            "recipient_email": "email address if sending",
-            "urgency": "high|medium|low"
-        }
+        # First try keyword-based analysis
+        keyword_analysis = self._analyze_email_with_keywords(message, user_context)
         
-        If the message indicates sending an email, always set action to "send_email"."""
-        
-        intent_text = await self._generate_ai_response(system_prompt, user_message, temperature=0.3)
-        return json.loads(intent_text)
-    
-    async def _get_email_data(self, limit: int = 10) -> Optional[List[Dict]]:
-        """Get email data from OneCom tools"""
         try:
-            if not self.onecom_tools or not self.onecom_tools.email_tool:
-                raise Exception("Email tool not properly initialized")
+            # Try AI analysis
+            ai_analysis = await self._try_ai_email_analysis(message, conversation_history, user_context)
             
-            # Use run_in_executor to run synchronous code in a thread pool
+            # If AI analysis succeeds and makes sense, use it
+            if ai_analysis and ai_analysis.get("task_type") and ai_analysis.get("confidence", 0) > 0.5:
+                print("Using AI email analysis result")
+                return ai_analysis
+            else:
+                print("AI email analysis failed or low confidence, using keyword fallback")
+                return keyword_analysis
+                
+        except Exception as e:
+            print(f"AI email analysis failed: {e}, using keyword fallback")
+            return keyword_analysis
+    
+    def _analyze_email_with_keywords(self, message: str, user_context: Dict) -> Dict[str, Any]:
+        """Robust keyword-based email analysis"""
+        message_lower = message.lower()
+        
+        # Extract email addresses
+        email_pattern = r'\b[A-Za-z0-9._%+-]+@[A-Za-z0-9.-]+\.[A-Z|a-z]{2,}\b'
+        emails = re.findall(email_pattern, message)
+        
+        # Get preferred emails from context
+        preferred_emails = user_context.get("preferred_emails", [])
+        
+        # Determine task type
+        if any(word in message_lower for word in ["send", "email", "ask", "tell", "message", "write"]):
+            task_type = "send_email"
+        elif any(word in message_lower for word in ["read", "check", "show", "view"]):
+            task_type = "read_emails"
+        elif any(word in message_lower for word in ["analyze", "summarize", "urgent"]):
+            task_type = "analyze_emails"
+        else:
+            task_type = "send_email"  # Default for email agent
+        
+        # Determine recipient
+        recipient = None
+        if emails:
+            recipient = emails[0]
+        elif preferred_emails:
+            recipient = preferred_emails[-1]  # Most recent
+        
+        # Determine email category
+        email_category = "general"
+        if any(word in message_lower for word in ["meeting", "schedule", "appointment", "time"]):
+            email_category = "scheduling"
+        elif any(word in message_lower for word in ["work", "project", "business"]):
+            email_category = "work"
+        
+        # Extract subject hint
+        subject_hint = "Follow-up"
+        if "meeting" in message_lower:
+            subject_hint = "Meeting Confirmation"
+        elif "time" in message_lower or "available" in message_lower:
+            subject_hint = "Time Confirmation"
+        
+        return {
+            "task_type": task_type,
+            "email_category": email_category,
+            "confidence": 0.8,
+            "is_follow_up": True,
+            "extracted_info": {
+                "recipient": recipient,
+                "recipient_name": self._extract_name_from_recipient(recipient) if recipient else "",
+                "subject_hint": subject_hint,
+                "email_purpose": f"Follow-up communication based on: {message[:100]}",
+                "tone": "professional",
+                "urgency": "medium",
+                "content_details": [message]
+            },
+            "context_info_used": {
+                "recipients_from_context": preferred_emails,
+                "topics_from_conversation": ["meeting discussion"],
+                "preferences_applied": ["preferred email address"]
+            },
+            "needs_calendar_context": email_category == "scheduling",
+            "follow_up_action": "Send follow-up email"
+        }
+    
+    def _extract_name_from_recipient(self, email: str) -> str:
+        """Extract name from email address"""
+        if not email:
+            return ""
+        
+        # Extract name from email (before @)
+        name_part = email.split('@')[0]
+        
+        # Handle common patterns
+        if '.' in name_part:
+            name_parts = name_part.split('.')
+            return ' '.join(part.capitalize() for part in name_parts)
+        else:
+            return name_part.capitalize()
+    
+    async def _try_ai_email_analysis(self, message: str, conversation_history: List[Dict], 
+                                    user_context: Dict) -> Optional[Dict[str, Any]]:
+        """Try AI analysis with proper error handling"""
+        
+        history_text = self._format_conversation_history(conversation_history)
+        
+        system_prompt = f"""Analyze this email request and return ONLY valid JSON.
+
+CONVERSATION CONTEXT:
+{history_text}
+
+USER CONTEXT:
+{json.dumps(user_context, indent=2)}
+
+CURRENT MESSAGE: "{message}"
+
+Return ONLY this JSON structure (no other text):
+{{
+    "task_type": "send_email|read_emails|analyze_emails|compose_email",
+    "email_category": "scheduling|work|personal|general",
+    "confidence": 0.0-1.0,
+    "is_follow_up": true/false,
+    "extracted_info": {{
+        "recipient": "email address",
+        "recipient_name": "recipient name",
+        "subject_hint": "email subject hint",
+        "email_purpose": "purpose of email",
+        "tone": "professional|casual|friendly",
+        "urgency": "high|medium|low"
+    }},
+    "needs_calendar_context": true/false
+}}"""
+
+        try:
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Analyze the email request."}
+                ],
+                temperature=0.1,
+                max_tokens=400
+            )
+            
+            response_content = response.choices[0].message.content.strip()
+            print(f"AI Email Analysis Response: {response_content}")
+            
+            # Clean the response
+            if not response_content.startswith('{'):
+                start_idx = response_content.find('{')
+                if start_idx != -1:
+                    response_content = response_content[start_idx:]
+                else:
+                    return None
+            
+            if not response_content.endswith('}'):
+                end_idx = response_content.rfind('}')
+                if end_idx != -1:
+                    response_content = response_content[:end_idx + 1]
+                else:
+                    return None
+            
+            return json.loads(response_content)
+            
+        except Exception as e:
+            print(f"AI email analysis error: {e}")
+            return None
+    
+    async def _handle_read_emails_with_context(self, message: str, task_analysis: Dict, 
+                                              conversation_history: List[Dict]) -> Dict[str, Any]:
+        """Handle reading emails with conversation context"""
+        try:
+            email_data = await self._get_email_data(10)
+            
+            if not email_data:
+                return {
+                    "success": True,
+                    "message": "You have no recent emails in your inbox.",
+                    "type": "no_emails",
+                    "emails_count": 0
+                }
+            
+            # Format emails for display
+            formatted_emails = []
+            for i, email in enumerate(email_data, 1):
+                subject = email.get('subject', 'No subject')
+                sender = email.get('from', 'Unknown sender')
+                date = email.get('date', 'Unknown date')
+                
+                # Shorten long fields
+                if len(subject) > 50:
+                    subject = subject[:47] + "..."
+                if len(sender) > 30:
+                    sender = sender[:27] + "..."
+                
+                email_text = f"{i}. **{subject}**\n   From: {sender}\n   Date: {date}"
+                formatted_emails.append(email_text)
+            
+            emails_display = '\n\n'.join(formatted_emails)
+            
+            return {
+                "success": True,
+                "message": f"Here are your {len(email_data)} most recent emails:\n\n{emails_display}",
+                "type": "emails_displayed",
+                "emails_count": len(email_data),
+                "emails": email_data
+            }
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error reading emails: {str(e)}",
+                "type": "error"
+            }
+    
+    async def _handle_analyze_emails_with_context(self, message: str, task_analysis: Dict, 
+                                                 conversation_history: List[Dict]) -> Dict[str, Any]:
+        """Handle analyzing emails with conversation context"""
+        try:
+            email_data = await self._get_email_data(15)
+            
+            if not email_data:
+                return {
+                    "success": True,
+                    "message": "You have no recent emails to analyze.",
+                    "type": "no_emails",
+                    "emails_count": 0
+                }
+            
+            return await self.email_analyzer.analyze_emails_with_context(
+                email_data, message, task_analysis, conversation_history
+            )
+            
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error analyzing emails: {str(e)}",
+                "type": "error"
+            }
+    
+    async def _handle_compose_and_send_with_context(self, message: str, task_analysis: Dict, 
+                                                   conversation_history: List[Dict], 
+                                                   user_context: Dict) -> Dict[str, Any]:
+        """Handle composing and sending emails with full context"""
+        try:
+            extracted_info = task_analysis.get("extracted_info", {})
+            
+            # Determine recipient
+            recipient = extracted_info.get("recipient")
+            if not recipient:
+                preferred_emails = user_context.get("preferred_emails", [])
+                if preferred_emails:
+                    recipient = preferred_emails[-1]  # Most recent
+            
+            if not recipient:
+                return {
+                    "success": False,
+                    "message": "Please specify the recipient's email address.",
+                    "type": "missing_recipient"
+                }
+            
+            # Get calendar context if needed
+            calendar_data = []
+            if task_analysis.get("needs_calendar_context"):
+                calendar_data = await self._get_calendar_context()
+            
+            # Compose email with robust error handling
+            email_content = await self.email_composer.compose_email_with_robust_handling(
+                message, task_analysis, conversation_history, user_context, calendar_data
+            )
+            
+            if not email_content.get("success"):
+                return email_content
+            
+            # Send email
+            return await self._send_email_with_context(recipient, email_content["email_data"], task_analysis)
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error composing/sending email: {str(e)}",
+                "type": "error"
+            }
+    
+    async def _send_email_with_context(self, recipient: str, email_data: Dict, task_analysis: Dict) -> Dict[str, Any]:
+        """Send email with context-aware confirmation message"""
+        try:
+            loop = asyncio.get_event_loop()
+            success = await loop.run_in_executor(
+                None,
+                self.onecom_tools.email_tool.send_email,
+                recipient,
+                email_data["subject"],
+                email_data["body"]
+            )
+            
+            if success:
+                success_message = f"✅ Email sent successfully to {recipient}"
+                
+                if task_analysis.get("is_follow_up"):
+                    success_message += " (following up on our conversation)"
+                
+                return {
+                    "success": True,
+                    "message": success_message,
+                    "type": "email_sent",
+                    "recipient": recipient,
+                    "subject": email_data["subject"],
+                    "email_content": email_data
+                }
+            else:
+                return {
+                    "success": False,
+                    "message": "Failed to send email. Please check your email settings.",
+                    "type": "email_send_failed",
+                    "email_content": email_data
+                }
+                
+        except Exception as e:
+            return {
+                "success": False,
+                "message": f"Error sending email: {str(e)}",
+                "type": "error"
+            }
+    
+    async def _get_email_data(self, limit: int = 10) -> List[Dict]:
+        """Get email data from OneComTools"""
+        try:
             loop = asyncio.get_event_loop()
             emails = await loop.run_in_executor(
-                None,  # Use default executor
+                None,
                 self.onecom_tools.email_tool.read_emails,
                 limit
             )
             
-            # Validate and clean email data
-            if emails is None:
+            if not emails:
                 return []
-                
+            
             cleaned_emails = []
             for email in emails:
                 if email is None:
                     continue
-                    
+                
                 cleaned_email = {
                     'subject': str(email.get('subject', 'No subject')),
                     'from': str(email.get('from', 'Unknown sender')),
@@ -614,53 +433,264 @@ class EmailAgent(BaseAgent):
             return cleaned_emails
             
         except Exception as e:
-            print(f"Error reading emails: {str(e)}")  # Log the error
+            print(f"Error reading emails: {str(e)}")
             return []
     
-    async def _execute_email_action(self, response: Dict, intent: Dict) -> Dict[str, Any]:
-        """Execute email sending action"""
+    async def _get_calendar_context(self) -> List[Dict]:
+        """Get calendar context for scheduling-related emails"""
         try:
-            if not response or not response.get("email_content"):
-                return {"success": False, "error": "No email content generated"}
+            from app.agents.scheduling_agent import SchedulingAgent
+            scheduling_agent = SchedulingAgent(self.onecom_tools)
+            return await scheduling_agent._get_calendar_data(7)
+        except Exception as e:
+            print(f"Error getting calendar context: {e}")
+            return []
+    
+    def _format_conversation_history(self, conversation_history: List[Dict]) -> str:
+        """Format conversation history for LLM"""
+        if not conversation_history:
+            return "No previous conversation."
+        
+        formatted = []
+        for msg in conversation_history[-8:]:
+            role = msg.get("role", "").title()
+            content = msg.get("content", "")[:200]
+            formatted.append(f"{role}: {content}")
+        
+        return "\n".join(formatted)
+
+
+class EmailAnalyzer:
+    """Enhanced email analyzer with conversation context"""
+    
+    def __init__(self, openai_client):
+        self.openai_client = openai_client
+    
+    async def analyze_emails_with_context(self, emails: List[Dict], user_message: str, 
+                                        task_analysis: Dict, conversation_history: List[Dict]) -> Dict[str, Any]:
+        """Analyze emails with conversation context"""
+        
+        if not emails:
+            return {
+                "success": True,
+                "message": "You have no recent emails to analyze.",
+                "type": "email_analysis",
+                "emails_count": 0
+            }
+        
+        # Simple analysis without complex AI for reliability
+        urgent_emails = self._identify_urgent_emails(emails)
+        
+        # Format emails for display
+        formatted_emails = []
+        for i, email in enumerate(emails[:5], 1):  # Show top 5
+            subject = email.get('subject', 'No subject')
+            sender = email.get('from', 'Unknown sender')
+            date = email.get('date', 'Unknown date')
             
-            recipient = intent.get("recipient_email")
-            if not recipient:
-                return {"success": False, "error": "No recipient email specified"}
+            if len(subject) > 50:
+                subject = subject[:47] + "..."
+            if len(sender) > 30:
+                sender = sender[:27] + "..."
             
-            email_data = response["email_content"]
-            if not isinstance(email_data, dict):
-                return {"success": False, "error": "Invalid email content format"}
+            urgency_marker = " ⚠️" if any(urgent['subject'] == email.get('subject') for urgent in urgent_emails) else ""
             
-            # Validate required fields
-            required_fields = ["subject", "body"]
-            if not all(field in email_data for field in required_fields):
-                return {"success": False, "error": "Missing required email fields"}
+            email_text = f"{i}. **{subject}**{urgency_marker}\n   From: {sender}\n   Date: {date}"
+            formatted_emails.append(email_text)
+        
+        emails_display = '\n\n'.join(formatted_emails)
+        
+        analysis_message = f"Email Analysis ({len(emails)} total emails):\n\n{emails_display}"
+        
+        if urgent_emails:
+            urgent_list = '\n'.join([f"• {urgent['subject']} - {urgent['reason']}" for urgent in urgent_emails[:3]])
+            analysis_message += f"\n\n🔔 **Urgent/Important emails:**\n{urgent_list}"
+        
+        return {
+            "success": True,
+            "message": analysis_message,
+            "type": "email_analysis",
+            "emails_count": len(emails),
+            "urgent_emails": urgent_emails
+        }
+    
+    def _identify_urgent_emails(self, emails: List[Dict]) -> List[Dict]:
+        """Identify urgent emails using keywords"""
+        urgent_keywords = ['urgent', 'asap', 'immediate', 'deadline', 'important', 'meeting', 'today', 'tomorrow']
+        urgent_emails = []
+        
+        for email in emails:
+            content = (email.get('subject', '') + ' ' + email.get('body', '')).lower()
+            reasons = []
             
-            # Use run_in_executor to run synchronous code in a thread pool
-            loop = asyncio.get_event_loop()
-            success = await loop.run_in_executor(
-                None,  # Use default executor
-                self.onecom_tools.email_tool.send_email,
-                recipient,
-                str(email_data["subject"]),
-                str(email_data["body"]),
-                str(email_data.get("html_body", "")) if email_data.get("html_body") else None
+            for keyword in urgent_keywords:
+                if keyword in content:
+                    reasons.append(f"contains '{keyword}'")
+            
+            if reasons:
+                urgent_emails.append({
+                    'subject': email.get('subject'),
+                    'from': email.get('from'),
+                    'reason': ', '.join(reasons)
+                })
+        
+        return urgent_emails
+
+
+class EmailComposer:
+    """Enhanced email composer with robust JSON handling"""
+    
+    def __init__(self, openai_client):
+        self.openai_client = openai_client
+    
+    async def compose_email_with_robust_handling(self, user_message: str, task_analysis: Dict, 
+                                               conversation_history: List[Dict], user_context: Dict,
+                                               calendar_data: List[Dict] = None) -> Dict[str, Any]:
+        """Compose email with robust error handling"""
+        
+        extracted_info = task_analysis.get("extracted_info", {})
+        email_category = task_analysis.get("email_category", "general")
+        
+        # Try AI composition first, fall back to template-based
+        try:
+            return await self._try_ai_composition(
+                user_message, task_analysis, conversation_history, user_context, calendar_data
+            )
+        except Exception as e:
+            print(f"AI composition failed: {e}, using template fallback")
+            return self._compose_with_template(
+                user_message, extracted_info, conversation_history, user_context
+            )
+    
+    async def _try_ai_composition(self, user_message: str, task_analysis: Dict, 
+                                conversation_history: List[Dict], user_context: Dict,
+                                calendar_data: List[Dict]) -> Dict[str, Any]:
+        """Try AI composition with proper JSON handling"""
+        
+        extracted_info = task_analysis.get("extracted_info", {})
+        history_text = self._format_conversation_for_composition(conversation_history)
+        
+        # Use simpler prompt to avoid JSON issues
+        system_prompt = f"""Compose a professional email based on the conversation context.
+
+CONVERSATION CONTEXT:
+{history_text}
+
+EMAIL REQUEST: "{user_message}"
+RECIPIENT: {extracted_info.get('recipient', 'Unknown')}
+SUBJECT HINT: {extracted_info.get('subject_hint', 'Follow-up')}
+EMAIL PURPOSE: {extracted_info.get('email_purpose', 'Follow-up communication')}
+
+Write a professional email that:
+1. References the conversation naturally
+2. Is clear and concise
+3. Has an appropriate subject line
+4. Uses professional tone
+
+Respond ONLY with this exact format:
+SUBJECT: [subject line here]
+BODY: [email body here]"""
+
+        try:
+            response = await self.openai_client.chat.completions.create(
+                model="gpt-4o-mini",
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": "Compose the email."}
+                ],
+                temperature=0.6,
+                max_tokens=600
             )
             
-            if success:
+            response_content = response.choices[0].message.content.strip()
+            print(f"AI Email Composition Response: {response_content[:200]}...")
+            
+            # Parse the simple format
+            subject_match = re.search(r'SUBJECT:\s*(.+)', response_content, re.IGNORECASE)
+            body_match = re.search(r'BODY:\s*(.+)', response_content, re.IGNORECASE | re.DOTALL)
+            
+            if subject_match and body_match:
+                subject = subject_match.group(1).strip()
+                body = body_match.group(1).strip()
+                
                 return {
                     "success": True,
-                    "message": f"Email sent successfully to {recipient}",
-                    "recipient": recipient,
-                    "subject": email_data["subject"],
-                    "type": "email_sent"
+                    "message": "Email composed with AI assistance.",
+                    "email_data": {
+                        "subject": subject,
+                        "body": body,
+                        "tone": "professional",
+                        "email_type": "ai_composed"
+                    }
                 }
             else:
-                return {
-                    "success": False,
-                    "message": "Failed to send email. Please check your email settings.",
-                    "type": "error"
-                }
+                raise Exception("Could not parse AI response format")
             
         except Exception as e:
-            return {"success": False, "error": str(e)} 
+            print(f"AI composition error: {e}")
+            raise e
+    
+    def _compose_with_template(self, user_message: str, extracted_info: Dict, 
+                             conversation_history: List[Dict], user_context: Dict) -> Dict[str, Any]:
+        """Compose email using template fallback"""
+        
+        recipient_name = extracted_info.get("recipient_name", "")
+        subject_hint = extracted_info.get("subject_hint", "Follow-up")
+        
+        # Determine if this is about meeting confirmation
+        message_lower = user_message.lower()
+        is_meeting_confirmation = any(word in message_lower for word in ["meeting", "time", "available", "schedule"])
+        
+        if is_meeting_confirmation:
+            subject = f"Meeting Time Confirmation - {subject_hint}"
+            
+            greeting = f"Hi {recipient_name}," if recipient_name else "Hi,"
+            
+            body = f"""{greeting}
+
+I wanted to follow up regarding our meeting discussion about the latest AI technology.
+
+Could you please confirm if you're available for the meeting at the proposed time? I want to make sure the timing works for you.
+
+Looking forward to hearing from you.
+
+Best regards"""
+        
+        else:
+            subject = f"Follow-up - {subject_hint}"
+            
+            greeting = f"Hi {recipient_name}," if recipient_name else "Hi,"
+            
+            body = f"""{greeting}
+
+I wanted to follow up on our recent conversation.
+
+{user_message.capitalize()[:200]}
+
+Please let me know your thoughts.
+
+Best regards"""
+        
+        return {
+            "success": True,
+            "message": "Email composed using template.",
+            "email_data": {
+                "subject": subject,
+                "body": body,
+                "tone": "professional",
+                "email_type": "template_composed"
+            }
+        }
+    
+    def _format_conversation_for_composition(self, conversation_history: List[Dict]) -> str:
+        """Format conversation for email composition"""
+        if not conversation_history:
+            return "No previous conversation."
+        
+        formatted = []
+        for msg in conversation_history[-4:]:  # Last 4 messages for context
+            role = msg.get("role", "").title()
+            content = msg.get("content", "")[:150]  # Shorter to avoid JSON issues
+            formatted.append(f"{role}: {content}")
+        
+        return "\n".join(formatted)
