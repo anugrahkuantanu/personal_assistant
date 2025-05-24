@@ -276,15 +276,21 @@ class CalendarTool:
             return False
             
         if not self.caldav_url:
-            print("❌ No CalDAV URL configured. Cannot create events.")
+            print("❌ No CalDAV URL configured.")
             return False
             
         try:
+            print(f"Creating calendar event: {summary}")
+            print(f"Start time: {start_time}")
+            print(f"End time: {end_time}")
+            
             client = caldav.DAVClient(
                 url=self.caldav_url,
                 username=self.username, 
                 password=self.password
             )
+            
+            print("Connected to CalDAV server")
             
             principal = client.principal()
             calendars = principal.calendars()
@@ -294,27 +300,40 @@ class CalendarTool:
                 return False
                 
             calendar = calendars[0]
+            print(f"Using calendar: {calendar.url}")
             
-            # Proper iCalendar formatting
-            event_text = f"""BEGIN:VCALENDAR
-            VERSION:2.0
-            PRODID:-//OneComAI Tool//EN
-            BEGIN:VEVENT
-            UID:{uuid.uuid4()}@onecom-tool
-            DTSTART:{start_time.strftime('%Y%m%dT%H%M%S')}
-            DTEND:{end_time.strftime('%Y%m%dT%H%M%S')}
-            SUMMARY:{summary}
-            DESCRIPTION:{description}
-            LOCATION:{location}
-            STATUS:CONFIRMED
-            END:VEVENT
-            END:VCALENDAR"""
+            # Create event with proper timezone handling
+            event = Event()
+            event.add('summary', summary)
+            event.add('dtstart', start_time)
+            event.add('dtend', end_time)
+            if description:
+                event.add('description', description)
+            if location:
+                event.add('location', location)
+            event.add('status', 'CONFIRMED')
+            event.add('uid', str(uuid.uuid4()) + '@onecom-tool')
             
-            calendar.add_event(event_text)
-            return True
+            # Create calendar object
+            cal = Calendar()
+            cal.add('prodid', '-//OneComAI Tool//EN')
+            cal.add('version', '2.0')
+            cal.add_component(event)
+            
+            # Save the event
+            try:
+                calendar.save_event(cal)
+                print("Event saved successfully")
+                return True
+            except Exception as e:
+                print(f"Error saving event: {str(e)}")
+                return False
             
         except Exception as e:
-            print(f"Error creating calendar event: {e}")
+            print(f"Error creating calendar event: {str(e)}")
+            print(f"Error type: {type(e)}")
+            import traceback
+            print(f"Traceback: {traceback.format_exc()}")
             return False
 
 

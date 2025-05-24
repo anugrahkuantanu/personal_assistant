@@ -17,7 +17,7 @@ class BaseAgent:
         raise NotImplementedError("Child classes must implement process_request method")
     
     async def _generate_ai_response(self, system_prompt: str, user_prompt: str, 
-                                  temperature: float = 0.7, max_tokens: int = 500) -> str:
+                                  temperature: float = 0.5, max_tokens: int = 500) -> str:
         """Common method for generating AI responses"""
         try:
             response = await self.openai_client.chat.completions.create(

@@ -289,22 +289,22 @@ class EmailAnalyzer:
         
         system_prompt = """You are a personal assistant analyzing email data. Provide insights about important emails.
 
-Focus on:
-- Urgent emails that need immediate attention
-- Important emails from key contacts
-- Action items and follow-ups needed
-- Meeting requests or calendar-related emails
-- Overall email patterns and priorities
+        Focus on:
+        - Urgent emails that need immediate attention
+        - Important emails from key contacts
+        - Action items and follow-ups needed
+        - Meeting requests or calendar-related emails
+        - Overall email patterns and priorities
 
-Be specific about which emails are most important and why."""
+        Be specific about which emails are most important and why."""
 
         user_prompt = f"""
-User asked: "{user_message}"
+        User asked: "{user_message}"
 
-Here are their recent emails:
-{emails_text}
+        Here are their recent emails:
+        {emails_text}
 
-Please analyze these emails and provide relevant insights based on their question."""
+        Please analyze these emails and provide relevant insights based on their question."""
 
         try:
             response = await self.openai_client.chat.completions.create(

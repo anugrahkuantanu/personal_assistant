@@ -54,28 +54,40 @@ const ChatWebsocket: React.FC<ChatWebsocketProps> = ({ endpoint }) => {
 
     ws.onmessage = (event) => {
       try {
-        const data: MessageData = JSON.parse(event.data);
+        const data: any = JSON.parse(event.data);
+        console.log('WebSocket data:', data); // Debug: log full backend response
         setLogs(prevLogs => {
           const lastLog = prevLogs[prevLogs.length - 1];
-          
           const formattedMessage = formatMessage(data.message);
-          
+
+          // If free_slots exist, format them for display
+          let slotsHtml = '';
+          if (Array.isArray(data.free_slots) && data.free_slots.length > 0) {
+            slotsHtml = '<ul style="margin-top:8px;">' +
+              data.free_slots.map((slot: any) => {
+                const start = slot.start ? new Date(slot.start).toLocaleString() : '';
+                const end = slot.end ? new Date(slot.end).toLocaleString() : '';
+                const duration = slot.duration_hours ? `${slot.duration_hours} hours` : '';
+                return `<li>🕒 <b>${start}</b> - <b>${end}</b> (${duration})</li>`;
+              }).join('') + '</ul>';
+          }
+
           // If we're receiving a streaming message and the last message is from the server
           if (data.streaming && lastLog?.type === 'server') {
             return [
               ...prevLogs.slice(0, -1),
               {
                 ...lastLog,
-                message: formattedMessage,
+                message: formattedMessage + slotsHtml,
                 timestamp: data.timestamp
               }
             ];
           }
-          
+
           // Otherwise add as new message
           return [...prevLogs, {
             type: 'server',
-            message: formattedMessage,
+            message: formattedMessage + slotsHtml,
             timestamp: data.timestamp
           }];
         });
